@@ -14,13 +14,16 @@ on:
     inputs:
       package:
         description: Package to search for (e.g. c-ares@1.34.6-r0)
-        required: true
+        required: false
+        default: c-ares@1.34.6-r0
       from:
         description: Start date (YYYY-MM-DD)
-        required: true
+        required: false
+        default: '2026-07-09'
       to:
         description: End date (YYYY-MM-DD)
-        required: true
+        required: false
+        default: '2026-07-13'
       environment:
         description: Kosli environment to search
         required: false
