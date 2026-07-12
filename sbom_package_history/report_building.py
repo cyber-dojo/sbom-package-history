@@ -1,3 +1,5 @@
+from urllib.parse import urlencode
+
 from sbom_package_history.kosli_normalizing import (
     attestation_html_url,
     normalize_baseline_artifact,
@@ -10,9 +12,12 @@ from sbom_package_history.segment_classification import classify_segment
 from sbom_package_history.service_timelines import group_into_service_timelines
 
 
-def _snapshot_url(host, org, environment, snapshot_index):
-    """Build the Kosli UI URL for an environment snapshot by its index."""
-    return f"{host}/{org}/environments/{environment}/snapshots/{snapshot_index}"
+def _snapshot_url(host, org, environment, snapshot_index, fingerprint):
+    """Build the Kosli UI URL deep-linking to a fingerprint's artifact within
+    an environment snapshot (the snapshot's running tab, focused on that
+    artifact's fingerprint)."""
+    base = f"{host}/{org}/environments/{environment}/snapshots/{snapshot_index}"
+    return f"{base}?{urlencode({'active_tab': 'running', 'fingerprint': fingerprint})}"
 
 
 def build_report(reader, environment, from_ts, to_ts, package, host, org):
@@ -72,7 +77,7 @@ def build_report(reader, environment, from_ts, to_ts, package, host, org):
         enriched = classify_segment(
             segment, provenance_by_fingerprint[fingerprint], sbom_by_fingerprint[fingerprint], spec
         )
-        enriched["snapshot_url"] = _snapshot_url(host, org, environment, segment["snapshot_index"])
+        enriched["snapshot_url"] = _snapshot_url(host, org, environment, segment["snapshot_index"], fingerprint)
         enriched["attestation_url"] = attestation_url_by_fingerprint[fingerprint]
         classified.append(enriched)
 

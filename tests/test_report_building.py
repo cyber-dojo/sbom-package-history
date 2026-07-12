@@ -27,9 +27,10 @@ URL_R1 = f"{HOST}/{ORG}/flows/runner-ci/trails/t-r1?attestation_id=r1"
 URL_D = f"{HOST}/{ORG}/flows/differ-ci/trails/t-d?attestation_id=d1"
 
 
-def _snap(index):
-    """Build the expected snapshot URL for an environment snapshot index."""
-    return f"{HOST}/{ORG}/environments/aws-prod/snapshots/{index}"
+def _snap(index, fingerprint):
+    """Build the expected snapshot URL deep-linking to a fingerprint's artifact."""
+    return (f"{HOST}/{ORG}/environments/aws-prod/snapshots/{index}"
+            f"?active_tab=running&fingerprint={fingerprint}")
 
 
 def _sbom(name, version, purl, html_url):
@@ -80,7 +81,7 @@ def test_a4c7d901():
                 "service": "runner",
                 "timeline": [{"start": JUN_01, "end": JUN_15, "status": "absent", "versions": []}],
                 "present_intervals": [],
-                "occurrences": [_occ(RUNNER_1, FP_R1, "not-in-sbom", JUN_01, JUN_15, _snap(100), URL_R1)],
+                "occurrences": [_occ(RUNNER_1, FP_R1, "not-in-sbom", JUN_01, JUN_15, _snap(100, FP_R1), URL_R1)],
             },
             {
                 "service": "saver",
@@ -90,8 +91,8 @@ def test_a4c7d901():
                 ],
                 "present_intervals": [(JUN_01, JUN_08)],
                 "occurrences": [
-                    _occ(SAVER_1, FP_S1, "in-sbom", JUN_01, JUN_08, _snap(100), URL_S1),
-                    _occ(SAVER_2, FP_S2, "not-in-sbom", JUN_08, JUN_15, _snap(101), URL_S2),
+                    _occ(SAVER_1, FP_S1, "in-sbom", JUN_01, JUN_08, _snap(100, FP_S1), URL_S1),
+                    _occ(SAVER_2, FP_S2, "not-in-sbom", JUN_08, JUN_15, _snap(101, FP_S2), URL_S2),
                 ],
             },
         ],
@@ -118,7 +119,7 @@ def test_a4c7d902():
                 "service": "differ",
                 "timeline": [{"start": JUN_08, "end": JUN_15, "status": "present", "versions": ["3.2.0"]}],
                 "present_intervals": [(JUN_08, JUN_15)],
-                "occurrences": [_occ(DIFFER_1, FP_D, "in-sbom", JUN_08, JUN_15, _snap(50), URL_D)],
+                "occurrences": [_occ(DIFFER_1, FP_D, "in-sbom", JUN_08, JUN_15, _snap(50, FP_D), URL_D)],
             },
         ],
     }
@@ -144,7 +145,7 @@ def test_a4c7d903():
                 "service": "web",
                 "timeline": [{"start": JUN_08, "end": JUN_15, "status": "unknown", "versions": []}],
                 "present_intervals": [],
-                "occurrences": [_occ(WEB_1, FP_W, "no-sbom", JUN_08, JUN_15, _snap(60), None)],
+                "occurrences": [_occ(WEB_1, FP_W, "no-sbom", JUN_08, JUN_15, _snap(60, FP_W), None)],
             },
         ],
     }
