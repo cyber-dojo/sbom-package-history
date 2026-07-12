@@ -1,0 +1,236 @@
+# sbom-package-history
+
+A tool that answers: **over a given date range, in which production services was
+a given software package present, and over what time periods?**
+
+The answer is, per service, a chronological present/absent timeline. It can flip
+as a service's running image changes over the range, and because a service runs
+several images concurrently (multiple ECS tasks, and old plus new during a
+rolling deploy), the status at any instant is the aggregate of all images running
+then: present if any of them held the package.
+
+## Inputs
+
+All required:
+
+- `--package` - the library, as `NAME[@VERSION]` or a full purl.
+  - `rack` or `pkg:gem/rack` - any version
+  - `rack@3.1` or `pkg:gem/rack@3.1` - version 3.1.x (component prefix)
+  - `rack@3.1.2` - exactly 3.1.2
+- `--from` / `--to` - the date range to inspect.
+
+There is deliberately no `--service` input. See "Why no service filter".
+
+## Governing constraints
+
+Two constraints shape the whole design:
+
+1. **Kosli has no query that takes a package name and returns which artifacts
+   contain it.** The package identity lives only inside each artifact's SBOM
+   data. The tool cannot push the query into Kosli; it must **pull** each
+   relevant image's SBOM out and scan it client-side. The real problem is
+   "enumerate the right images, fetch and cache their SBOMs, fold the matches
+   into a timeline", not "query".
+
+2. **Flow (pipeline) names are mutable and have changed over time.** Filtering by
+   a user-supplied service name mapped to a flow name (`<service>-ci`) would
+   silently miss a service's history from before a rename - a false "absent",
+   which the robustness rule forbids. So service name is never a filter.
+
+## Why no service filter
+
+The stable identity of a running image is its **fingerprint** (image digest):
+immutable and unique. Enumeration, interval reconstruction, and SBOM fetching all
+key on the fingerprint, never on a flow name.
+
+The tool therefore enumerates **every** image that ran in production over the
+range, across all services, and derives a **service label** for reporting from
+the image ref (the ECR repo segment, e.g. `runner` in
+`...dkr.ecr...amazonaws.com/runner:88b7eea@sha256:...`). That label is more
+stable than the flow name and is used only to group and present results, never
+to decide what to inspect.
+
+The flow name is still needed for one thing: fetching an image's SBOM
+(`kosli get attestation` requires `--flow`). That flow name is read from the
+snapshot/event record for each fingerprint at query time, so a rename does not
+break retrieval - it is never taken from user input.
+
+## Scope of this version
+
+Production runtime only, driven from the `aws-prod` Kosli environment. A later
+variant will add build-history (driven from the CI flows directly). The design
+keeps image-enumeration separate from the SBOM-match core so that second front
+end can reuse the core unchanged.
+
+## Data model (verified live against the cyber-dojo org)
+
+- Org `cyber-dojo`, host `https://app.kosli.com`.
+- Environment `aws-prod` (ECS), snapshotted frequently (observed ~120s apart).
+- Each image is built into a CI flow, fingerprint = image digest, with a custom
+  attestation named `sbom-facts` whose `attestation_data` is
+  `{spec_version, created, creators, relationship_count,
+  packages: [{name, version, license, purl}]}`.
+
+### Verified CLI shapes (all read-only, `--output json`)
+
+A GET-only throwaway token is sufficient for all of these.
+
+1. Baseline snapshot index: `kosli log environment aws-prod --end-ts <F>
+   --page-limit 1` -> the latest event at or before `--from`. Its
+   `snapshot_index` is the snapshot active at `--from`, because it is the most
+   recent change before it and snapshots persist between events. An empty result
+   means `--from` predates all history, so there is no baseline.
+
+2. Snapshot contents: `kosli get snapshot aws-prod#<index>`
+   -> `.artifacts[]` each with `fingerprint`, `name` (full image ref, source of
+   the service label), `flow_name`, `flows[]`, `git_commit`. The baseline
+   inventory of what is running when the range opens.
+
+3. Environment events: `kosli log environment aws-prod --start-ts <F> --end-ts <T>`
+   -> per-event `sha256` (fingerprint), `artifact_name` (image ref),
+   `pipeline` (flow name), `reported_at`, `snapshot_index`, `type`. Only
+   changes, not every snapshot. Paginated, max 100 per page.
+
+4. SBOM for an image: `kosli get attestation sbom-facts --flow <flow_name>
+   --fingerprint <fp>` -> `attestation_data.packages[] {name, version, license,
+   purl}`. The `<flow_name>` comes from the fingerprint's own event/snapshot
+   record.
+
+### Event-type vocabulary (authoritative, from server `environment_consts.py`)
+
+Interval boundaries are driven only by these. Sampling the live API would miss
+the rarer and deprecated ones, so the vocabulary is taken from the source.
+
+- **Opens** a running interval (fingerprint 0 -> N), `STARTED_EVENT_TYPES`:
+  `started` (deprecated), `started-compliant`, `started-non-compliant`,
+  `started-unknown`.
+- **Closes** a running interval (fingerprint N -> 0): `exited`.
+- **Ignored** (same fingerprint keeps running; count/compliance/metadata only):
+  `changed` (deprecated), `scaled`, `became-compliant`, `became-non-compliant`,
+  `updated-provenance`, `unchanged`.
+
+Compliance is irrelevant to whether an image is running: every `started-*`
+variant opens an interval.
+
+## Algorithm
+
+1. **Baseline.** Read the latest event at or before `--from`
+   (`log environment --end-ts <from> --page-limit 1`) and take its
+   `snapshot_index`; fetch that snapshot's artifacts. They are every image
+   running when the range opens, each with fingerprint, image ref, and flow
+   name. Their intervals start clamped to `--from`. An empty event result means
+   `--from` predates all history, so the baseline is empty.
+
+2. **Events.** Walk `kosli log environment aws-prod` across `[from, to]`. A
+   started-type event opens an interval for its fingerprint at `reported_at`; an
+   `exited` event closes it. The same fingerprint can start, exit, then start
+   again, producing multiple intervals (the flip case). Intervals still open at
+   `--to` are clamped to `--to`.
+
+3. **Segments.** The result is a list of running-image segments, each
+   `{fingerprint, image_name, start, end}`, across all services.
+
+4. **Fetch each distinct image's SBOM once**, via its own flow name, keyed and
+   cached by fingerprint (an image's SBOM is immutable).
+
+5. **Match** the package in each SBOM (see Package matching). Label each segment
+   present / absent / unknown, with the matched version when present.
+
+6. **Group and sweep.** Group segments by service label (image repo name). Per
+   service, the segments can overlap in time (concurrent images), so the timeline
+   is built by an interval sweep, not a sequential merge: the distinct segment
+   start/end times cut the range into sub-intervals within which the running set
+   is constant, and each sub-interval takes the aggregate status of the images
+   running across it (present if any is present, else unknown if any is unknown,
+   else absent) with the union of the present images' versions. Contiguous
+   sub-intervals of the same status merge; a sub-interval with no running image
+   is a gap that breaks a run. Report, per service, the union of PRESENT
+   intervals as the headline, with the run breakdown below.
+
+Example output shape:
+
+```
+package: pkg:gem/rack
+range:   2026-06-01 00:00 .. 2026-07-01 00:00 UTC
+
+saver
+  present  2026-06-01 00:00 .. 2026-06-08 00:00  (3.0.0)
+  absent   2026-06-08 00:00 .. 2026-06-20 00:00
+  present  2026-06-20 00:00 .. 2026-07-01 00:00  (3.1.2)
+  => present: 2026-06-01 00:00 .. 2026-06-08 00:00, 2026-06-20 00:00 .. 2026-07-01 00:00
+
+runner
+  ...
+```
+
+## Package matching
+
+Identity (which package) is separate from version (which build of it).
+
+- **Identity**: match by `purl` when the input is a purl (ecosystem-qualified,
+  unambiguous; the SBOM package's purl is reduced to its identity by stripping
+  version, qualifiers and subpath); otherwise by exact `name` (so `rack` does not
+  match `rackup`, with the caveat that a bare name can collide across ecosystems:
+  gem vs deb vs npm).
+
+  A real example from `aws-prod`: querying the bare name `openssl` reports the
+  Ruby services as present at version `4.0.0` and nginx as absent. That is
+  correct but easy to misread. The `4.0.0` is the Ruby gem `pkg:gem/openssl`, not
+  the OS library; nginx (Alpine, no Ruby) has no package literally named
+  `openssl`, though it does ship the OS TLS library as `libssl3` / `libcrypto3`
+  (`pkg:apk/alpine/libssl3`, with `upstream=openssl` in the purl). So a bare
+  `openssl` answers "which services bundle a package named openssl", which here
+  means the gem. To hunt the OS library, query by purl: `pkg:deb/debian/openssl`
+  on the Debian services, `pkg:apk/alpine/libssl3` on nginx. Matching the purl's
+  `upstream=` qualifier to catch OS-level OpenSSL across distros regardless of
+  package name is a possible future enhancement.
+
+- **Version**: the entered version is treated as a **dot-component prefix**,
+  compared component-by-component against the SBOM package's `version` field,
+  never as a raw string prefix.
+  - `3.1.2` matches only `3.1.2` (a complete prefix is an exact match).
+  - `3.1` matches `3.1.0`, `3.1.2`, `3.1.9`.
+  - `3.1` does NOT match `3.10.0` (component-aware: `[3,1]` vs `[3,10,0]`).
+  - omitted version matches any version.
+
+- **Not** a semver range comparator: no `>=` / `<` ranges. Odd ecosystem
+  versions (`1.1.1f-1ubuntu2.16`, epochs like `2:1.2.3`) split sensibly on `.`
+  but "the third number" only has its intuitive meaning for dotted versions.
+
+## Robustness
+
+Fail toward "present / unknown", never silently toward "absent". If an image's
+`sbom-facts` cannot be fetched or parsed, or its flow cannot be resolved, its
+interval is reported as `unknown` (possibly present), not `absent`. A missing
+SBOM must never read as "the package was not there".
+
+## Implementation
+
+Python. Structured so the logic is unit-testable without the network:
+
+- **Pure core** (done, fully unit-tested):
+  - `version_matching.version_matches` - the component-prefix version rule.
+  - `package_presence.package_present` - purl/name identity plus version filter.
+  - `timeline_building.build_timeline` - fold segments into present/absent runs.
+- **Pure core** (to do):
+  - reconstruct running-image segments from a baseline plus started/exited
+    events, keyed on fingerprint, with the event vocabulary as an explicit
+    constant.
+  - derive the service label from an image ref.
+- **Thin Kosli I/O boundary** (to do) - the only code that shells out to `kosli`
+  and parses its JSON. Isolated so tests do not hit the network.
+- **CLI front end** (to do) - argparse, long-form flags, `-h` help with a usage
+  example.
+
+### Assumptions and the tests that will prove them
+
+- Component-prefix version matching, including `3.1` not matching `3.10.0`:
+  proven by `tests/test_version_matching.py`.
+- Package identity, including `rack` not matching `rackup` and purl qualifier
+  stripping: proven by `tests/test_package_presence.py`.
+- Timeline folding across present/absent/present flips: proven by
+  `tests/test_timeline_building.py`.
+- Interval reconstruction from the started/exited vocabulary: to be proven by the
+  segment-reconstruction unit tests (written first, red-green).
+- CLI JSON shapes above: proven live during investigation; re-checked by the I/O
+  boundary's parsing against captured real responses.

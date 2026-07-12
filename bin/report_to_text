@@ -1,0 +1,27 @@
+#!/usr/bin/env python3
+"""Read an sbom-package-history JSON report from stdin and print it as text."""
+import json
+import os
+import sys
+
+_HELP = """\
+Usage: bin/report_to_text [-h]
+
+Reads an sbom-package-history JSON report from stdin and prints it as text.
+
+Options:
+  -h    Show this help
+
+Example:
+  sbom-package-history --package rack --from 2026-06-01 --to 2026-07-01 | bin/report_to_text
+"""
+
+if "-h" in sys.argv[1:]:
+    print(_HELP)
+    sys.exit(0)
+
+sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), ".."))
+
+from sbom_package_history.report_text import format_report_text
+
+print(format_report_text(json.load(sys.stdin)))
