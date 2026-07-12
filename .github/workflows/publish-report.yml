@@ -1,0 +1,82 @@
+name: ▶️ Publish report
+
+# Generates an interactive sbom-package-history HTML report and publishes it to
+# the gh-pages branch under a per-run "run-<run_id>/" directory, then links the
+# page in the run's step summary. Reports accumulate; the companion
+# prune-published-reports workflow deletes old run-* directories on a schedule.
+#
+# gh-pages must be enabled as the Pages source (Settings -> Pages -> Deploy from
+# a branch -> gh-pages -> / (root)). The gh-pages branch is created by the first
+# run of this workflow, so enable the Pages source after that first run.
+
+on:
+  workflow_dispatch:
+    inputs:
+      package:
+        description: Package to search for (e.g. c-ares@1.34.6-r0)
+        required: true
+      from:
+        description: Start date (YYYY-MM-DD)
+        required: true
+      to:
+        description: End date (YYYY-MM-DD)
+        required: true
+      environment:
+        description: Kosli environment to search
+        required: false
+        default: aws-prod
+
+permissions:
+  contents: write          # required to push the report to gh-pages
+
+jobs:
+
+  publish:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: cyber-dojo/harden-runner@main
+      - uses: cyber-dojo/pinned-checkout@main
+      - uses: cyber-dojo/setup-kosli-cli@main
+
+      # The report is a self-contained interactive HTML page (four category
+      # tabs). --api-token defaults to a read-only throwaway; the tool scrubs
+      # KOSLI_* env vars, so read-only access needs no secret. index.html is the
+      # page Pages serves by default for the run-<id>/ directory.
+      - name: Generate interactive HTML report
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p public
+          ./bin/sbom-package-history \
+            --package "${{ github.event.inputs.package }}" \
+            --from "${{ github.event.inputs.from }}" \
+            --to "${{ github.event.inputs.to }}" \
+            --environment "${{ github.event.inputs.environment }}" \
+            --progress \
+            | ./bin/report_to_html > public/index.html
+
+      - name: Publish to gh-pages under a per-run path
+        uses: peaceiris/actions-gh-pages@v4
+        with:
+          github_token: ${{ secrets.GITHUB_TOKEN }}
+          publish_dir: ./public
+          destination_dir: run-${{ github.run_id }}
+          keep_files: true       # keep other runs' reports (prune handles cleanup)
+
+      - name: Link the report in the step summary
+        shell: bash
+        run: |
+          owner=$(echo "${{ github.repository_owner }}" | tr '[:upper:]' '[:lower:]')
+          repo="${{ github.event.repository.name }}"
+          url="https://${owner}.github.io/${repo}/run-${{ github.run_id }}/"
+          {
+            echo "## sbom-package-history report"
+            echo ""
+            echo "- Package: \`${{ github.event.inputs.package }}\`"
+            echo "- Range: ${{ github.event.inputs.from }} .. ${{ github.event.inputs.to }}"
+            echo "- Environment: ${{ github.event.inputs.environment }}"
+            echo ""
+            echo "[Open interactive report](${url})"
+            echo ""
+            echo "_Pages may take up to a minute to publish; the link 404s until then._"
+          } >> "$GITHUB_STEP_SUMMARY"

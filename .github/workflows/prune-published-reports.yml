@@ -1,0 +1,80 @@
+name: 📦 Prune published reports
+
+# The report-publishing workflow pushes each run's interactive HTML into a
+# per-run "run-<run_id>/" directory on the gh-pages branch. Those reports are
+# meant to be ephemeral, but gh-pages keeps them forever. This workflow deletes
+# run-* directories once they are older than RETENTION_DAYS.
+
+on:
+  schedule:
+    - cron: '17 3 * * *'   # daily at 03:17 UTC
+  workflow_dispatch:
+    inputs:
+      retention_days:
+        description: Delete run reports older than this many days
+        required: false
+        default: '7'
+
+permissions:
+  contents: write          # required to push the pruning commit to gh-pages
+
+env:
+  RETENTION_DAYS: ${{ github.event.inputs.retention_days || '7' }}
+
+jobs:
+
+  prune:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: cyber-dojo/harden-runner@main
+
+      # pinned-checkout takes no "ref" input, so we use the same pinned
+      # actions/checkout SHA it wraps and point it at gh-pages. fetch-depth: 0
+      # is required so "git log" can report each directory's real commit age.
+      - name: Checkout gh-pages
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+        with:
+          ref: gh-pages
+          fetch-depth: 0
+
+      - name: Prune run reports older than RETENTION_DAYS
+        id: prune
+        shell: bash
+        run: |
+          shopt -s nullglob
+          now=$(date +%s)
+          cutoff=$(( RETENTION_DAYS * 86400 ))
+          pruned=0
+          for dir in run-*/; do
+            [ -d "$dir" ] || continue
+            # Last commit that touched this directory == when the run published it.
+            last=$(git log -1 --format=%ct -- "$dir")
+            [ -n "$last" ] || continue
+            age=$(( now - last ))
+            if [ "$age" -gt "$cutoff" ]; then
+              echo "pruning ${dir} (age $(( age / 86400 ))d)"
+              rm -rf "$dir"
+              pruned=$(( pruned + 1 ))
+            fi
+          done
+          echo "pruned=${pruned}" >> "$GITHUB_OUTPUT"
+
+      - name: Commit and push the pruning
+        if: steps.prune.outputs.pruned != '0'
+        shell: bash
+        run: |
+          git config user.name  "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add -A
+          git commit -m "Prune ${{ steps.prune.outputs.pruned }} run report(s) older than ${RETENTION_DAYS} days"
+          git push
+
+      - name: Report what was pruned
+        if: always()
+        shell: bash
+        run: |
+          {
+            echo "## Prune published reports"
+            echo ""
+            echo "Removed **${{ steps.prune.outputs.pruned }}** run report(s) older than ${RETENTION_DAYS} days."
+          } >> "$GITHUB_STEP_SUMMARY"
