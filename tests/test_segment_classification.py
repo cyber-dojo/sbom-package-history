@@ -8,51 +8,51 @@ JUN_08 = 1780876800
 SEGMENT = {"fingerprint": FP, "image_name": IMAGE, "start": JUN_01, "end": JUN_08}
 
 PACKAGES = [
-    {"name": "rack",    "version": "3.0.0", "license": "MIT",     "purl": "pkg:gem/rack@3.0.0"},
+    {"name": "rack",    "version": "3.0.0",  "license": "MIT",     "purl": "pkg:gem/rack@3.0.0"},
     {"name": "openssl", "version": "3.0.11", "license": "OpenSSL", "purl": "pkg:deb/debian/openssl@3.0.11"},
 ]
 
 ANY_RACK = {"name": "rack", "purl": None, "version": None}
 
 
+def _expected(category, status, version):
+    """The classified segment expected for the shared SEGMENT with these labels."""
+    return {**SEGMENT, "category": category, "status": status, "version": version}
+
+
 def test_8d1c6f01():
-    """A segment whose SBOM could not be fetched is classified unknown."""
-    assert classify_segment(SEGMENT, None, ANY_RACK) == {
-        "fingerprint": FP, "image_name": IMAGE, "start": JUN_01, "end": JUN_08,
-        "status": "unknown", "version": None,
-    }
+    """An image with no provenance is category no-provenance and status unknown."""
+    assert classify_segment(SEGMENT, False, None, ANY_RACK) == _expected("no-provenance", "unknown", None)
 
 
 def test_8d1c6f02():
-    """A segment whose SBOM contains the package is present with the SBOM's actual version."""
-    assert classify_segment(SEGMENT, PACKAGES, ANY_RACK) == {
-        "fingerprint": FP, "image_name": IMAGE, "start": JUN_01, "end": JUN_08,
-        "status": "present", "version": "3.0.0",
-    }
+    """Provenance but an unfetchable SBOM (None) is no-sbom / unknown."""
+    assert classify_segment(SEGMENT, True, None, ANY_RACK) == _expected("no-sbom", "unknown", None)
 
 
 def test_8d1c6f03():
-    """A segment whose SBOM lacks the package is classified absent."""
-    spec = {"name": "leftpad", "purl": None, "version": None}
-    assert classify_segment(SEGMENT, PACKAGES, spec) == {
-        "fingerprint": FP, "image_name": IMAGE, "start": JUN_01, "end": JUN_08,
-        "status": "absent", "version": None,
-    }
+    """Provenance but an empty SBOM ([]) is no-sbom / unknown, never a false absent."""
+    assert classify_segment(SEGMENT, True, [], ANY_RACK) == _expected("no-sbom", "unknown", None)
 
 
 def test_8d1c6f04():
-    """A matching version filter reports present with the concrete SBOM version."""
-    spec = {"name": "rack", "purl": None, "version": "3.0"}
-    assert classify_segment(SEGMENT, PACKAGES, spec) == {
-        "fingerprint": FP, "image_name": IMAGE, "start": JUN_01, "end": JUN_08,
-        "status": "present", "version": "3.0.0",
-    }
+    """An SBOM containing the package is in-sbom / present with the SBOM's version."""
+    assert classify_segment(SEGMENT, True, PACKAGES, ANY_RACK) == _expected("in-sbom", "present", "3.0.0")
 
 
 def test_8d1c6f05():
-    """A version filter that no package satisfies is classified absent."""
+    """An SBOM lacking the package is not-in-sbom / absent."""
+    spec = {"name": "leftpad", "purl": None, "version": None}
+    assert classify_segment(SEGMENT, True, PACKAGES, spec) == _expected("not-in-sbom", "absent", None)
+
+
+def test_8d1c6f06():
+    """A matching version filter is in-sbom / present with the concrete version."""
+    spec = {"name": "rack", "purl": None, "version": "3.0"}
+    assert classify_segment(SEGMENT, True, PACKAGES, spec) == _expected("in-sbom", "present", "3.0.0")
+
+
+def test_8d1c6f07():
+    """A version filter that no package satisfies is not-in-sbom / absent."""
     spec = {"name": "rack", "purl": None, "version": "3.1"}
-    assert classify_segment(SEGMENT, PACKAGES, spec) == {
-        "fingerprint": FP, "image_name": IMAGE, "start": JUN_01, "end": JUN_08,
-        "status": "absent", "version": None,
-    }
+    assert classify_segment(SEGMENT, True, PACKAGES, spec) == _expected("not-in-sbom", "absent", None)

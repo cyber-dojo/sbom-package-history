@@ -1,0 +1,58 @@
+#!/usr/bin/env bash
+#
+# Demo: the c-ares supersession, rendered as HTML (four category tabs).
+#
+# Same search as cares_text_demo (c-ares 1.34.6-r0 in saver, aws-prod, superseded
+# by 1.34.8-r0 on 2026-07-12), piped through report_to_html. Saves the page to
+# /tmp/cares_html_demo.html and opens it in the default browser.
+set -euo pipefail
+
+OUT=/tmp/cares_html_demo.html
+
+show_help() {
+  cat <<'EOF'
+Usage: bin/cares_html_demo [-h]
+
+Runs sbom-package-history against the live cyber-dojo aws-prod environment for a
+superseded library version (c-ares 1.34.6-r0 in saver), renders a self-contained
+HTML page (four tabs), saves it to /tmp/cares_html_demo.html, and opens it in the
+default browser. Per-call progress dots go to stderr.
+
+Options:
+  -h    Show this help
+
+Example:
+  bin/cares_html_demo
+EOF
+}
+
+if [ "${1:-}" = "-h" ]; then
+  show_help
+  exit 0
+fi
+
+here="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+
+"${here}/sbom-package-history" --help
+
+cat <<'EOF'
+
+This demo searches cyber-dojo's Kosli aws-prod environment for:
+  library:  c-ares  1.34.6-r0   (a curl dependency, since superseded by 1.34.8-r0)
+  from:     2026-07-09
+  to:       2026-07-13
+
+EOF
+
+"${here}/sbom-package-history" \
+  --package c-ares@1.34.6-r0 \
+  --from 2026-07-09 \
+  --to   2026-07-13 \
+  --environment aws-prod \
+  --api-token demo-read-only-throwaway \
+  --progress \
+  | "${here}/report_to_html" > "${OUT}"
+
+echo
+echo "wrote ${OUT}"
+open "${OUT}"

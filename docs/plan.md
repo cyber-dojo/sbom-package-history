@@ -115,6 +115,27 @@ the rarer and deprecated ones, so the vocabulary is taken from the source.
 Compliance is irrelevant to whether an image is running: every `started-*`
 variant opens an interval.
 
+### Provenance and categories (authoritative, from server `environment_artifact.py`)
+
+An artifact's `sbom-facts` lives in its **build flow** - the artifact's primary
+flow in a snapshot record, `flows[0]` (= the top-level `flow_name`, the
+`<service>-ci` flow). A fingerprint is usually in several flows (the build flow
+plus `snyk-*` and `production-promotion`), but only the build flow carries
+`sbom-facts`, so category resolution reads the build flow and ignores the others.
+Empirically `flows[0]` is the `-ci` build flow for every cyber-dojo service.
+
+- **no provenance**: the snapshot record has no flows for the image
+  (`has_provenance = flows != []`) - no build flow, no SBOM.
+- **no sbom**: a build flow exists but has no usable `sbom-facts` (a missing
+  attestation returns `[]` with exit 0).
+- **not in sbom** / **in sbom**: `sbom-facts` present, package absent / present.
+
+Binary-reproducibility (the same fingerprint built from two commits, so its build
+flow holds two trails) is set aside: the build flow is read as a single trail.
+Within a flow the server already resolves the fingerprint to its most-recent
+trail (`find_by_fingerprint` returns the latest by `created_at`); across flows,
+`flows[0]` is the build flow, never a most-recent-by-time pick.
+
 ## Algorithm
 
 1. **Baseline.** Read the latest event at or before `--from`
@@ -135,32 +156,33 @@ variant opens an interval.
    The snapshot_index (the opening event's, or the baseline snapshot's) is the
    proof the image was running.
 
-4. **Fetch each distinct image's SBOM once**, via its own flow name, keyed and
-   cached by fingerprint (an image's SBOM is immutable). The same call returns
-   the attestation's `html_url`, kept as the evidence link.
+4. **Classify each distinct image into one of four categories** (see Provenance
+   and categories). Resolve its build flow (the artifact's primary flow) and
+   fetch `sbom-facts` from it once, cached by fingerprint (the same call yields
+   the attestation's `html_url`). `no-provenance` (no build flow) / `no-sbom`
+   (build flow but empty or missing `sbom-facts`) / `not-in-sbom` (SBOM present,
+   package absent) / `in-sbom` (SBOM present, package present, with its version).
+   A coarser status (in-sbom -> present, not-in-sbom -> absent, the other two ->
+   unknown) drives the timeline.
 
-5. **Classify and enrich.** Match the package in each SBOM (see Package matching)
-   and label each segment present / absent / unknown, with the matched version
-   when present. Enrich each segment with its `snapshot_url` (built from
-   snapshot_index) and `attestation_url` (the SBOM attestation's html_url).
+5. **Enrich.** Each segment carries `snapshot_url` (built from snapshot_index)
+   and `attestation_url` (the `sbom-facts` html_url, or null).
 
-6. **Group and sweep.** Group segments by service label (image repo name). Per
-   service, the segments can overlap in time, so the timeline is built by an
-   interval sweep, not a sequential merge: the distinct segment start/end times
-   cut the range into sub-intervals within which the running set is constant, and
-   each sub-interval takes the aggregate status of the images running across it
-   (present if any is present, else unknown if any is unknown, else absent) with
-   the union of the present images' versions. Contiguous sub-intervals of the
-   same status merge; a sub-interval with no running image is a gap that breaks a
-   run. Each run is annotated with the evidence of every image that ran during
-   it. Report, per service, the union of PRESENT intervals as the headline.
+6. **Group.** Group segments by service label (image repo name). Per service:
+   a present/absent/unknown **timeline** built by an interval sweep (segments can
+   overlap; the distinct start/end times cut the range into sub-intervals whose
+   status is the aggregate of the images running across it - present if any is
+   present, else unknown if any is unknown, else absent - with contiguous
+   same-status sub-intervals merged and gaps breaking a run); the union of
+   present intervals; and an **occurrences** list, one record per run, for the
+   tab views.
 
 ## Output
 
-The CLI emits the report as **JSON** on stdout; separate formatters render it
-(`report_to_text` today, `report_to_markdown` planned), so a new view needs no
-change to the tool. Progress dots (`--progress`) go to stderr, keeping stdout
-pipe-clean.
+The CLI emits the report as **JSON** on stdout; separate formatters render it -
+`report_to_text` and `report_to_html`, each a thin `bin/` script over a pure
+formatter - so a new view needs no change to the tool. Progress dots
+(`--progress`) go to stderr, keeping stdout pipe-clean.
 
 JSON contract:
 
@@ -172,40 +194,37 @@ JSON contract:
   "services": [
     {
       "service": "<image-repo label>",
-      "timeline": [
-        {
-          "start": <unix seconds>,
-          "end": <unix seconds>,
-          "status": "present | absent | unknown",
-          "versions": ["<present-run versions>"],
-          "images": [
-            {
-              "image_name": "<ecr image ref>",
-              "fingerprint": "<sha256>",
-              "status": "present | absent | unknown",
-              "version": "<matched version or null>",
-              "snapshot_url": "<Kosli snapshot proving it ran>",
-              "attestation_url": "<Kosli sbom-facts attestation, or null>"
-            }
-          ]
-        }
+      "timeline": [                        # swept present/absent/unknown, for text
+        {"start": <unix>, "end": <unix>,
+         "status": "present | absent | unknown",
+         "versions": ["<present-run versions>"]}
       ],
-      "present_intervals": [[start, end]]
+      "present_intervals": [[start, end]],  # union of present runs
+      "occurrences": [                       # one per run, for the tab views
+        {
+          "image_name": "<ecr image ref>",
+          "fingerprint": "<sha256>",
+          "category": "no-provenance | no-sbom | not-in-sbom | in-sbom",
+          "first_date": <unix seconds>,      # run start
+          "last_date": <unix seconds>,       # run end
+          "snapshot_url": "<Kosli snapshot proving it ran>",
+          "attestation_url": "<Kosli sbom-facts attestation, or null>"
+        }
+      ]
     }
   ]
 }
 ```
 
-A collapsed present interval can span several artifacts, so its run's `images`
-lists them all - each with its own status and evidence links (a concurrent image
-lacking the package shows `absent`; one whose SBOM was missing shows `unknown`).
+`timeline` is the aggregated present/absent view (a present run means any image
+running then held the package). `occurrences` is the raw per-run layer: one
+record per contiguous run of a fingerprint, with its 4-way category and evidence
+links; a fingerprint's several runs (e.g. a rollback) appear as several
+occurrences.
 
-The text formatter defaults to a collapsed view: never-present services grouped
-first under one indented `never present` line, then present services each showing
-only their non-absent runs, one line per run. It ignores `images`. The markdown
-formatter will surface the per-image evidence and clickable URLs.
-
-Text rendering:
+**Text** (`report_to_text`): a collapsed view - never-present services grouped
+first under one indented `never present` line, then present services showing only
+their non-absent runs, one line per run.
 
 ```
 package: pkg:gem/rack
@@ -218,6 +237,12 @@ saver
   present  2026-06-01 00:00 .. 2026-06-08 00:00  (3.0.0)
   present  2026-06-20 00:00 .. 2026-07-01 00:00  (3.1.2)
 ```
+
+**HTML** (`report_to_html`): a self-contained page - the package and range, then
+four top-level tabs (no provenance / no sbom / not in sbom / in sbom, each with a
+count), listing per service one row per occurrence: dates, image, fingerprint,
+and links to the snapshot and the `sbom-facts` attestation (blank for
+no-provenance / no-sbom). CSS and tab JS are inlined so it works offline.
 
 ## Package matching
 
@@ -277,14 +302,18 @@ whole stack above it runs on canned responses.
   - `segment_reconstruction.reconstruct_segments` - baseline plus started/exited
     events into per-image segments, with the event vocabulary as an explicit
     constant.
-  - `segment_classification.classify_segment` - present/absent/unknown + version.
+  - `segment_classification.classify_segment` - the 4-way category (and coarser
+    status) plus the matched version.
   - `timeline_building.build_timeline` - interval sweep folding segments into runs.
-  - `service_timelines.group_into_service_timelines` - group by service, sweep,
-    and annotate each run with its images' evidence.
+  - `service_timelines.group_into_service_timelines` - group by service into a
+    timeline, present-interval union, and per-run occurrences.
+  - `category_bucketing.bucket_occurrences_by_category` - regroup occurrences into
+    the four tabs (all present, in order).
   - `kosli_normalizing` - normalize raw kosli JSON into the core's shapes.
   - `date_parsing.parse_date_to_epoch` - `--from`/`--to` into UTC epoch seconds.
   - `report_building.build_report` - orchestrate the pipeline into the report dict.
   - `report_text.format_report_text` - render the report as text.
+  - `report_html.format_report_html` - render the report as a self-contained HTML page.
 - **Kosli I/O**:
   - `kosli_cli.KosliCli` - the sole network boundary: runs a read-only `kosli`
     command as JSON, in a scrubbed environment (only PATH) so ambient KOSLI_*
@@ -293,8 +322,10 @@ whole stack above it runs on canned responses.
 - **CLI and scripts**:
   - `cli.main` (via `bin/sbom-package-history`) - argparse, long flags, `-h` with
     an example, `--progress` dots on stderr; emits the report as JSON.
-  - `bin/report_to_text` - render JSON from stdin as text (markdown planned).
-  - `bin/cares_demo` - the c-ares supersession demo.
+  - `bin/report_to_text`, `bin/report_to_html` - render JSON from stdin as text
+    or a self-contained HTML page.
+  - `bin/cares_text_demo`, `bin/cares_html_demo` - the c-ares supersession demo
+    (text and HTML), also exposed as `make` targets.
 
 ### Assumptions and the tests that prove them
 
@@ -303,10 +334,11 @@ whole stack above it runs on canned responses.
   `test_package_presence`, `test_package_spec`.
 - Interval reconstruction from the started/exited vocabulary:
   `test_segment_reconstruction`.
-- Concurrency-aware sweep and per-run evidence: `test_timeline_building`,
+- Concurrency-aware sweep and per-run occurrences: `test_timeline_building`,
   `test_service_timelines`.
-- Fail-toward-unknown for missing or empty SBOMs: `test_segment_classification`,
-  `test_report_building`.
+- 4-way categorisation and fail-toward-unknown for missing/empty SBOMs:
+  `test_segment_classification`, `test_report_building`.
+- Bucketing occurrences into the four tabs: `test_category_bucketing`.
 - The whole stack on canned kosli responses: `test_kosli_reader`,
   `test_report_building` (via the FakeKosliCli stub).
 - CLI JSON shapes: proven live against the cyber-dojo org during investigation.

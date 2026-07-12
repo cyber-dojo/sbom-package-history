@@ -47,21 +47,31 @@ def build_report(reader, environment, from_ts, to_ts, package, host, org):
 
     segments = reconstruct_segments(baseline, events, from_ts, to_ts)
 
+    provenance_by_fingerprint = {}
     sbom_by_fingerprint = {}
     attestation_url_by_fingerprint = {}
     for fingerprint in {segment["fingerprint"] for segment in segments}:
         flow = fingerprint_flow.get(fingerprint)
-        raw = reader.sbom_attestation(flow, fingerprint) if flow is not None else None
+        # An empty or missing flow means Kosli has no provenance for the image.
+        has_provenance = bool(flow)
+        provenance_by_fingerprint[fingerprint] = has_provenance
+        if not has_provenance:
+            sbom_by_fingerprint[fingerprint] = None
+            attestation_url_by_fingerprint[fingerprint] = None
+            continue
+        raw = reader.sbom_attestation(flow, fingerprint)
         packages = sbom_packages_from_attestation(raw) if raw is not None else None
         # An empty package list means no usable SBOM (a missing attestation returns
-        # []), so treat it like a failed fetch: unknown, never a definitive absent.
+        # []), so treat it like a failed fetch: no-sbom, never a definitive absent.
         sbom_by_fingerprint[fingerprint] = packages if packages else None
         attestation_url_by_fingerprint[fingerprint] = attestation_html_url(raw) if raw is not None else None
 
     classified = []
     for segment in segments:
         fingerprint = segment["fingerprint"]
-        enriched = classify_segment(segment, sbom_by_fingerprint[fingerprint], spec)
+        enriched = classify_segment(
+            segment, provenance_by_fingerprint[fingerprint], sbom_by_fingerprint[fingerprint], spec
+        )
         enriched["snapshot_url"] = _snapshot_url(host, org, environment, segment["snapshot_index"])
         enriched["attestation_url"] = attestation_url_by_fingerprint[fingerprint]
         classified.append(enriched)

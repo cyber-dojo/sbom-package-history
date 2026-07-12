@@ -40,8 +40,17 @@ def _sbom(name, version, purl, html_url):
     }
 
 
+def _occ(image_name, fingerprint, category, first_date, last_date, snapshot_url, attestation_url):
+    """Build an expected occurrence record."""
+    return {
+        "image_name": image_name, "fingerprint": fingerprint, "category": category,
+        "first_date": first_date, "last_date": last_date,
+        "snapshot_url": snapshot_url, "attestation_url": attestation_url,
+    }
+
+
 def test_a4c7d901():
-    """A saver redeploy dropping rack, alongside a never-present runner, builds the full report."""
+    """A saver redeploy dropping rack, alongside a runner without it, builds timelines and occurrences."""
     cli = FakeKosliCli(
         baseline_events=[{"snapshot_index": 100, "sha256": FP_R1, "type": "exited",
                           "pipeline": "runner-ci", "reported_at": JUN_01 - 3600}],
@@ -61,8 +70,7 @@ def test_a4c7d901():
             FP_R1: _sbom("nginx", "1.25.0", "pkg:deb/debian/nginx@1.25.0", URL_R1),
         },
     )
-    reader = KosliReader(cli)
-    report = build_report(reader, "aws-prod", JUN_01, JUN_15, "pkg:gem/rack", HOST, ORG)
+    report = build_report(KosliReader(cli), "aws-prod", JUN_01, JUN_15, "pkg:gem/rack", HOST, ORG)
     assert report == {
         "package": "pkg:gem/rack",
         "from": JUN_01,
@@ -70,31 +78,28 @@ def test_a4c7d901():
         "services": [
             {
                 "service": "runner",
-                "timeline": [{
-                    "start": JUN_01, "end": JUN_15, "status": "absent", "versions": [],
-                    "images": [{"image_name": RUNNER_1, "fingerprint": FP_R1, "status": "absent",
-                                "version": None, "snapshot_url": _snap(100), "attestation_url": URL_R1}],
-                }],
+                "timeline": [{"start": JUN_01, "end": JUN_15, "status": "absent", "versions": []}],
                 "present_intervals": [],
+                "occurrences": [_occ(RUNNER_1, FP_R1, "not-in-sbom", JUN_01, JUN_15, _snap(100), URL_R1)],
             },
             {
                 "service": "saver",
                 "timeline": [
-                    {"start": JUN_01, "end": JUN_08, "status": "present", "versions": ["3.0.0"],
-                     "images": [{"image_name": SAVER_1, "fingerprint": FP_S1, "status": "present",
-                                 "version": "3.0.0", "snapshot_url": _snap(100), "attestation_url": URL_S1}]},
-                    {"start": JUN_08, "end": JUN_15, "status": "absent", "versions": [],
-                     "images": [{"image_name": SAVER_2, "fingerprint": FP_S2, "status": "absent",
-                                 "version": None, "snapshot_url": _snap(101), "attestation_url": URL_S2}]},
+                    {"start": JUN_01, "end": JUN_08, "status": "present", "versions": ["3.0.0"]},
+                    {"start": JUN_08, "end": JUN_15, "status": "absent", "versions": []},
                 ],
                 "present_intervals": [(JUN_01, JUN_08)],
+                "occurrences": [
+                    _occ(SAVER_1, FP_S1, "in-sbom", JUN_01, JUN_08, _snap(100), URL_S1),
+                    _occ(SAVER_2, FP_S2, "not-in-sbom", JUN_08, JUN_15, _snap(101), URL_S2),
+                ],
             },
         ],
     }
 
 
 def test_a4c7d902():
-    """With no baseline (from predates history), a service starting mid-range is still reported."""
+    """With no baseline, a service starting mid-range is reported as an in-sbom occurrence."""
     cli = FakeKosliCli(
         baseline_events=[],
         range_pages=[[
@@ -103,8 +108,7 @@ def test_a4c7d902():
         ]],
         attestations={FP_D: _sbom("rack", "3.2.0", "pkg:gem/rack@3.2.0", URL_D)},
     )
-    reader = KosliReader(cli)
-    report = build_report(reader, "aws-prod", JUN_01, JUN_15, "rack", HOST, ORG)
+    report = build_report(KosliReader(cli), "aws-prod", JUN_01, JUN_15, "rack", HOST, ORG)
     assert report == {
         "package": "rack",
         "from": JUN_01,
@@ -112,19 +116,16 @@ def test_a4c7d902():
         "services": [
             {
                 "service": "differ",
-                "timeline": [{
-                    "start": JUN_08, "end": JUN_15, "status": "present", "versions": ["3.2.0"],
-                    "images": [{"image_name": DIFFER_1, "fingerprint": FP_D, "status": "present",
-                                "version": "3.2.0", "snapshot_url": _snap(50), "attestation_url": URL_D}],
-                }],
+                "timeline": [{"start": JUN_08, "end": JUN_15, "status": "present", "versions": ["3.2.0"]}],
                 "present_intervals": [(JUN_08, JUN_15)],
+                "occurrences": [_occ(DIFFER_1, FP_D, "in-sbom", JUN_08, JUN_15, _snap(50), URL_D)],
             },
         ],
     }
 
 
 def test_a4c7d903():
-    """An image whose sbom-facts attestation is absent (empty result) is unknown, not absent."""
+    """An image whose sbom-facts attestation is absent ([]) is no-sbom, not not-in-sbom."""
     cli = FakeKosliCli(
         baseline_events=[],
         range_pages=[[
@@ -133,8 +134,7 @@ def test_a4c7d903():
         ]],
         attestations={FP_W: []},
     )
-    reader = KosliReader(cli)
-    report = build_report(reader, "aws-prod", JUN_01, JUN_15, "rack", HOST, ORG)
+    report = build_report(KosliReader(cli), "aws-prod", JUN_01, JUN_15, "rack", HOST, ORG)
     assert report == {
         "package": "rack",
         "from": JUN_01,
@@ -142,12 +142,9 @@ def test_a4c7d903():
         "services": [
             {
                 "service": "web",
-                "timeline": [{
-                    "start": JUN_08, "end": JUN_15, "status": "unknown", "versions": [],
-                    "images": [{"image_name": WEB_1, "fingerprint": FP_W, "status": "unknown",
-                                "version": None, "snapshot_url": _snap(60), "attestation_url": None}],
-                }],
+                "timeline": [{"start": JUN_08, "end": JUN_15, "status": "unknown", "versions": []}],
                 "present_intervals": [],
+                "occurrences": [_occ(WEB_1, FP_W, "no-sbom", JUN_08, JUN_15, _snap(60), None)],
             },
         ],
     }

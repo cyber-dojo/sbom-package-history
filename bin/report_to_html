@@ -1,0 +1,28 @@
+#!/usr/bin/env python3
+"""Read an sbom-package-history JSON report from stdin and print a self-contained HTML file."""
+import json
+import os
+import sys
+
+_HELP = """\
+Usage: bin/report_to_html [-h]
+
+Reads an sbom-package-history JSON report from stdin and prints a self-contained
+HTML page (four tabs: no provenance / no sbom / not in sbom / in sbom).
+
+Options:
+  -h    Show this help
+
+Example:
+  sbom-package-history --package rack --from 2026-06-01 --to 2026-07-01 | bin/report_to_html > report.html
+"""
+
+if "-h" in sys.argv[1:]:
+    print(_HELP)
+    sys.exit(0)
+
+sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), ".."))
+
+from sbom_package_history.report_html import format_report_html
+
+print(format_report_html(json.load(sys.stdin)))
