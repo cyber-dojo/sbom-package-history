@@ -2,10 +2,12 @@ def normalize_event(raw):
     """Normalize a raw `kosli log environment` event into the core's event shape.
 
     The raw event carries the fingerprint as sha256, the image ref as
-    artifact_name, and the flow as pipeline, among many other fields. Returns
-    {fingerprint, image_name, type, reported_at, flow} - the flow lets a later
-    step fetch this fingerprint's SBOM with the correct --flow, read from the
-    record rather than from user input.
+    artifact_name, the flow as pipeline, and the snapshot index, among many other
+    fields. Returns {fingerprint, image_name, type, reported_at, flow,
+    snapshot_index} - the flow lets a later step fetch this fingerprint's SBOM
+    with the correct --flow, and snapshot_index identifies the snapshot that
+    proves the image was running, both read from the record rather than from user
+    input.
     """
     return {
         "fingerprint": raw["sha256"],
@@ -13,6 +15,7 @@ def normalize_event(raw):
         "type": raw["type"],
         "reported_at": raw["reported_at"],
         "flow": raw["pipeline"],
+        "snapshot_index": raw["snapshot_index"],
     }
 
 
@@ -44,3 +47,17 @@ def sbom_packages_from_attestation(raw):
             return []
         raw = raw[0]
     return raw.get("attestation_data", {}).get("packages", [])
+
+
+def attestation_html_url(raw):
+    """Return the html_url of a raw `kosli get attestation` result, or None.
+
+    Handles the bare-object and single-element-array forms. Returns None when the
+    attestation, or its html_url, is absent. This is the Kosli UI link to the
+    exact attestation the SBOM evidence came from.
+    """
+    if isinstance(raw, list):
+        if not raw:
+            return None
+        raw = raw[0]
+    return raw.get("html_url")

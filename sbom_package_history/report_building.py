@@ -1,4 +1,5 @@
 from sbom_package_history.kosli_normalizing import (
+    attestation_html_url,
     normalize_baseline_artifact,
     normalize_event,
     sbom_packages_from_attestation,
@@ -9,7 +10,12 @@ from sbom_package_history.segment_classification import classify_segment
 from sbom_package_history.service_timelines import group_into_service_timelines
 
 
-def build_report(reader, environment, from_ts, to_ts, package):
+def _snapshot_url(host, org, environment, snapshot_index):
+    """Build the Kosli UI URL for an environment snapshot by its index."""
+    return f"{host}/{org}/environments/{environment}/snapshots/{snapshot_index}"
+
+
+def build_report(reader, environment, from_ts, to_ts, package, host, org):
     """Build the package-history report for a package over a range in an environment.
 
     Orchestrates the whole pipeline through the injected reader: read the baseline
@@ -17,8 +23,11 @@ def build_report(reader, environment, from_ts, to_ts, package):
     range's environment events, reconstruct each image's running segments, fetch
     and cache each distinct image's SBOM via the flow recorded for its
     fingerprint, classify every segment present/absent/unknown against the parsed
-    package spec, then group the segments into per-service timelines. Returns the
-    report dict {package, from, to, services} that report_formatting renders.
+    package spec, and enrich it with the URL of the snapshot proving it ran and
+    the URL of the SBOM attestation. Grouping into per-service timelines then
+    annotates each run with the evidence of the images that ran during it. host
+    and org are used to build the snapshot URLs. Returns the report dict
+    {package, from, to, services}.
     """
     spec = parse_package_spec(package)
 
@@ -28,6 +37,7 @@ def build_report(reader, environment, from_ts, to_ts, package):
     if baseline_index is not None:
         for raw_artifact in reader.snapshot_artifacts(environment, baseline_index):
             image = normalize_baseline_artifact(raw_artifact)
+            image["snapshot_index"] = baseline_index
             baseline.append(image)
             fingerprint_flow[image["fingerprint"]] = image["flow"]
 
@@ -38,18 +48,23 @@ def build_report(reader, environment, from_ts, to_ts, package):
     segments = reconstruct_segments(baseline, events, from_ts, to_ts)
 
     sbom_by_fingerprint = {}
+    attestation_url_by_fingerprint = {}
     for fingerprint in {segment["fingerprint"] for segment in segments}:
         flow = fingerprint_flow.get(fingerprint)
-        if flow is None:
-            sbom_by_fingerprint[fingerprint] = None
-        else:
-            raw = reader.sbom_attestation(flow, fingerprint)
-            sbom_by_fingerprint[fingerprint] = None if raw is None else sbom_packages_from_attestation(raw)
+        raw = reader.sbom_attestation(flow, fingerprint) if flow is not None else None
+        packages = sbom_packages_from_attestation(raw) if raw is not None else None
+        # An empty package list means no usable SBOM (a missing attestation returns
+        # []), so treat it like a failed fetch: unknown, never a definitive absent.
+        sbom_by_fingerprint[fingerprint] = packages if packages else None
+        attestation_url_by_fingerprint[fingerprint] = attestation_html_url(raw) if raw is not None else None
 
-    classified = [
-        classify_segment(segment, sbom_by_fingerprint[segment["fingerprint"]], spec)
-        for segment in segments
-    ]
+    classified = []
+    for segment in segments:
+        fingerprint = segment["fingerprint"]
+        enriched = classify_segment(segment, sbom_by_fingerprint[fingerprint], spec)
+        enriched["snapshot_url"] = _snapshot_url(host, org, environment, segment["snapshot_index"])
+        enriched["attestation_url"] = attestation_url_by_fingerprint[fingerprint]
+        classified.append(enriched)
 
     return {
         "package": package,

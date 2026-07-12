@@ -19,22 +19,27 @@ def reconstruct_segments(baseline, events, range_from, range_to):
     """Reconstruct the running-image segments across an environment over a range.
 
     baseline is the list of images running when the range opens, each
-    {fingerprint, image_name}; their intervals start at range_from. events is the
-    normalized list of environment events, each {fingerprint, image_name, type,
-    reported_at}, and is sorted here by reported_at before processing. A
+    {fingerprint, image_name, snapshot_index}; their intervals start at
+    range_from. events is the normalized list of environment events, each
+    {fingerprint, image_name, type, reported_at, snapshot_index}, and is sorted
+    here by reported_at before processing. Each segment carries the
+    snapshot_index of the record that opened it (the baseline snapshot for a
+    baseline image, the started event for one that started in range), which
+    proves the image was running. A
     started-type event opens an interval for its fingerprint at reported_at (if
     that fingerprint is not already running); an exited event closes the open
     interval for its fingerprint at reported_at; all other event types are
     ignored. The same fingerprint can start, exit, then start again, producing
     several segments. Any interval still open when the range closes ends at
-    range_to. Returns the segments, each {fingerprint, image_name, start, end},
-    sorted by (start, fingerprint).
+    range_to. Returns the segments, each {fingerprint, image_name, start, end,
+    snapshot_index}, sorted by (start, fingerprint).
     """
     open_intervals = {}
     for image in baseline:
         open_intervals[image["fingerprint"]] = {
             "image_name": image["image_name"],
             "start": range_from,
+            "snapshot_index": image["snapshot_index"],
         }
     segments = []
     for event in sorted(events, key=itemgetter("reported_at")):
@@ -44,6 +49,7 @@ def reconstruct_segments(baseline, events, range_from, range_to):
                 open_intervals[fingerprint] = {
                     "image_name": event["image_name"],
                     "start": event["reported_at"],
+                    "snapshot_index": event["snapshot_index"],
                 }
         elif event["type"] == EXITED_EVENT_TYPE:
             opened = open_intervals.pop(fingerprint, None)
@@ -53,6 +59,7 @@ def reconstruct_segments(baseline, events, range_from, range_to):
                     "image_name": opened["image_name"],
                     "start": opened["start"],
                     "end": event["reported_at"],
+                    "snapshot_index": opened["snapshot_index"],
                 })
     for fingerprint, opened in open_intervals.items():
         segments.append({
@@ -60,6 +67,7 @@ def reconstruct_segments(baseline, events, range_from, range_to):
             "image_name": opened["image_name"],
             "start": opened["start"],
             "end": range_to,
+            "snapshot_index": opened["snapshot_index"],
         })
     segments.sort(key=itemgetter("start", "fingerprint"))
     return segments

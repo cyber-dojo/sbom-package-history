@@ -11,7 +11,7 @@ set -euo pipefail
 
 show_help() {
   cat <<'EOF'
-Usage: bin/cares_demo [-h]
+Usage: bin/cares_text_demo [-h]
 
 Runs sbom-package-history against the live cyber-dojo aws-prod environment for a
 superseded library version (c-ares 1.34.6-r0 in saver), showing the
@@ -22,7 +22,7 @@ Options:
   -h    Show this help
 
 Example:
-  bin/cares_demo
+  bin/cares_text_demo
 EOF
 }
 

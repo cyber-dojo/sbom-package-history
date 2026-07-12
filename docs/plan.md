@@ -4,10 +4,9 @@ A tool that answers: **over a given date range, in which production services was
 a given software package present, and over what time periods?**
 
 The answer is, per service, a chronological present/absent timeline. It can flip
-as a service's running image changes over the range, and because a service runs
-several images concurrently (multiple ECS tasks, and old plus new during a
-rolling deploy), the status at any instant is the aggregate of all images running
-then: present if any of them held the package.
+as a service's running image changes over the range, and because an old and new
+image briefly overlap during a rolling deploy, the status at any instant is the
+aggregate of the images running then: present if any of them held the package.
 
 ## Inputs
 
@@ -93,8 +92,12 @@ A GET-only throwaway token is sufficient for all of these.
 
 4. SBOM for an image: `kosli get attestation sbom-facts --flow <flow_name>
    --fingerprint <fp>` -> `attestation_data.packages[] {name, version, license,
-   purl}`. The `<flow_name>` comes from the fingerprint's own event/snapshot
-   record.
+   purl}`, plus `html_url` (the attestation's UI link, used as the evidence URL).
+   The `<flow_name>` comes from the fingerprint's own event/snapshot record. An
+   image with no such attestation returns an empty `[]` with exit 0 (see
+   Robustness). The snapshot URL is
+   `<host>/<org>/environments/<env>/snapshots/<index>` (also in each event's
+   `_links.snapshot.html`).
 
 ### Event-type vocabulary (authoritative, from server `environment_consts.py`)
 
@@ -128,39 +131,92 @@ variant opens an interval.
    `--to` are clamped to `--to`.
 
 3. **Segments.** The result is a list of running-image segments, each
-   `{fingerprint, image_name, start, end}`, across all services.
+   `{fingerprint, image_name, start, end, snapshot_index}`, across all services.
+   The snapshot_index (the opening event's, or the baseline snapshot's) is the
+   proof the image was running.
 
 4. **Fetch each distinct image's SBOM once**, via its own flow name, keyed and
-   cached by fingerprint (an image's SBOM is immutable).
+   cached by fingerprint (an image's SBOM is immutable). The same call returns
+   the attestation's `html_url`, kept as the evidence link.
 
-5. **Match** the package in each SBOM (see Package matching). Label each segment
-   present / absent / unknown, with the matched version when present.
+5. **Classify and enrich.** Match the package in each SBOM (see Package matching)
+   and label each segment present / absent / unknown, with the matched version
+   when present. Enrich each segment with its `snapshot_url` (built from
+   snapshot_index) and `attestation_url` (the SBOM attestation's html_url).
 
 6. **Group and sweep.** Group segments by service label (image repo name). Per
-   service, the segments can overlap in time (concurrent images), so the timeline
-   is built by an interval sweep, not a sequential merge: the distinct segment
-   start/end times cut the range into sub-intervals within which the running set
-   is constant, and each sub-interval takes the aggregate status of the images
-   running across it (present if any is present, else unknown if any is unknown,
-   else absent) with the union of the present images' versions. Contiguous
-   sub-intervals of the same status merge; a sub-interval with no running image
-   is a gap that breaks a run. Report, per service, the union of PRESENT
-   intervals as the headline, with the run breakdown below.
+   service, the segments can overlap in time, so the timeline is built by an
+   interval sweep, not a sequential merge: the distinct segment start/end times
+   cut the range into sub-intervals within which the running set is constant, and
+   each sub-interval takes the aggregate status of the images running across it
+   (present if any is present, else unknown if any is unknown, else absent) with
+   the union of the present images' versions. Contiguous sub-intervals of the
+   same status merge; a sub-interval with no running image is a gap that breaks a
+   run. Each run is annotated with the evidence of every image that ran during
+   it. Report, per service, the union of PRESENT intervals as the headline.
 
-Example output shape:
+## Output
+
+The CLI emits the report as **JSON** on stdout; separate formatters render it
+(`report_to_text` today, `report_to_markdown` planned), so a new view needs no
+change to the tool. Progress dots (`--progress`) go to stderr, keeping stdout
+pipe-clean.
+
+JSON contract:
+
+```
+{
+  "package": "<the --package string>",
+  "from": <unix seconds>,
+  "to": <unix seconds>,
+  "services": [
+    {
+      "service": "<image-repo label>",
+      "timeline": [
+        {
+          "start": <unix seconds>,
+          "end": <unix seconds>,
+          "status": "present | absent | unknown",
+          "versions": ["<present-run versions>"],
+          "images": [
+            {
+              "image_name": "<ecr image ref>",
+              "fingerprint": "<sha256>",
+              "status": "present | absent | unknown",
+              "version": "<matched version or null>",
+              "snapshot_url": "<Kosli snapshot proving it ran>",
+              "attestation_url": "<Kosli sbom-facts attestation, or null>"
+            }
+          ]
+        }
+      ],
+      "present_intervals": [[start, end]]
+    }
+  ]
+}
+```
+
+A collapsed present interval can span several artifacts, so its run's `images`
+lists them all - each with its own status and evidence links (a concurrent image
+lacking the package shows `absent`; one whose SBOM was missing shows `unknown`).
+
+The text formatter defaults to a collapsed view: never-present services grouped
+first under one indented `never present` line, then present services each showing
+only their non-absent runs, one line per run. It ignores `images`. The markdown
+formatter will surface the per-image evidence and clickable URLs.
+
+Text rendering:
 
 ```
 package: pkg:gem/rack
 range:   2026-06-01 00:00 .. 2026-07-01 00:00 UTC
 
+creator, runner
+  never present
+
 saver
   present  2026-06-01 00:00 .. 2026-06-08 00:00  (3.0.0)
-  absent   2026-06-08 00:00 .. 2026-06-20 00:00
   present  2026-06-20 00:00 .. 2026-07-01 00:00  (3.1.2)
-  => present: 2026-06-01 00:00 .. 2026-06-08 00:00, 2026-06-20 00:00 .. 2026-07-01 00:00
-
-runner
-  ...
 ```
 
 ## Package matching
@@ -202,35 +258,55 @@ Identity (which package) is separate from version (which build of it).
 Fail toward "present / unknown", never silently toward "absent". If an image's
 `sbom-facts` cannot be fetched or parsed, or its flow cannot be resolved, its
 interval is reported as `unknown` (possibly present), not `absent`. A missing
-SBOM must never read as "the package was not there".
+SBOM must never read as "the package was not there". In particular,
+`get attestation` for an image with no `sbom-facts` returns an empty `[]` with
+exit 0; since a real container SBOM always has packages, an empty package list
+means no usable SBOM and is treated as `unknown`, not `absent`.
 
 ## Implementation
 
-Python. Structured so the logic is unit-testable without the network:
+Python, structured so all logic is unit-tested without the network. The only
+code that touches the network is one low-level class, stubbed in tests so the
+whole stack above it runs on canned responses.
 
-- **Pure core** (done, fully unit-tested):
-  - `version_matching.version_matches` - the component-prefix version rule.
+- **Pure core** (fully unit-tested):
+  - `version_matching.version_matches` - component-prefix version rule.
   - `package_presence.package_present` - purl/name identity plus version filter.
-  - `timeline_building.build_timeline` - fold segments into present/absent runs.
-- **Pure core** (to do):
-  - reconstruct running-image segments from a baseline plus started/exited
-    events, keyed on fingerprint, with the event vocabulary as an explicit
+  - `package_spec.parse_package_spec` - parse `NAME[@VERSION]` or a purl.
+  - `service_label.service_label_from_image_ref` - derive the service label.
+  - `segment_reconstruction.reconstruct_segments` - baseline plus started/exited
+    events into per-image segments, with the event vocabulary as an explicit
     constant.
-  - derive the service label from an image ref.
-- **Thin Kosli I/O boundary** (to do) - the only code that shells out to `kosli`
-  and parses its JSON. Isolated so tests do not hit the network.
-- **CLI front end** (to do) - argparse, long-form flags, `-h` help with a usage
-  example.
+  - `segment_classification.classify_segment` - present/absent/unknown + version.
+  - `timeline_building.build_timeline` - interval sweep folding segments into runs.
+  - `service_timelines.group_into_service_timelines` - group by service, sweep,
+    and annotate each run with its images' evidence.
+  - `kosli_normalizing` - normalize raw kosli JSON into the core's shapes.
+  - `date_parsing.parse_date_to_epoch` - `--from`/`--to` into UTC epoch seconds.
+  - `report_building.build_report` - orchestrate the pipeline into the report dict.
+  - `report_text.format_report_text` - render the report as text.
+- **Kosli I/O**:
+  - `kosli_cli.KosliCli` - the sole network boundary: runs a read-only `kosli`
+    command as JSON, in a scrubbed environment (only PATH) so ambient KOSLI_*
+    variables cannot leak in. Stubbed by `tests/fake_kosli_cli.py`.
+  - `kosli_reader.KosliReader` - the four queries built on an injected KosliCli.
+- **CLI and scripts**:
+  - `cli.main` (via `bin/sbom-package-history`) - argparse, long flags, `-h` with
+    an example, `--progress` dots on stderr; emits the report as JSON.
+  - `bin/report_to_text` - render JSON from stdin as text (markdown planned).
+  - `bin/cares_demo` - the c-ares supersession demo.
 
-### Assumptions and the tests that will prove them
+### Assumptions and the tests that prove them
 
-- Component-prefix version matching, including `3.1` not matching `3.10.0`:
-  proven by `tests/test_version_matching.py`.
-- Package identity, including `rack` not matching `rackup` and purl qualifier
-  stripping: proven by `tests/test_package_presence.py`.
-- Timeline folding across present/absent/present flips: proven by
-  `tests/test_timeline_building.py`.
-- Interval reconstruction from the started/exited vocabulary: to be proven by the
-  segment-reconstruction unit tests (written first, red-green).
-- CLI JSON shapes above: proven live during investigation; re-checked by the I/O
-  boundary's parsing against captured real responses.
+- Component-prefix version matching (`3.1` not `3.10.0`): `test_version_matching`.
+- Package identity (`rack` not `rackup`, purl qualifier stripping):
+  `test_package_presence`, `test_package_spec`.
+- Interval reconstruction from the started/exited vocabulary:
+  `test_segment_reconstruction`.
+- Concurrency-aware sweep and per-run evidence: `test_timeline_building`,
+  `test_service_timelines`.
+- Fail-toward-unknown for missing or empty SBOMs: `test_segment_classification`,
+  `test_report_building`.
+- The whole stack on canned kosli responses: `test_kosli_reader`,
+  `test_report_building` (via the FakeKosliCli stub).
+- CLI JSON shapes: proven live against the cyber-dojo org during investigation.

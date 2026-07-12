@@ -2,6 +2,7 @@ from sbom_package_history.kosli_normalizing import (
     normalize_event,
     normalize_baseline_artifact,
     sbom_packages_from_attestation,
+    attestation_html_url,
 )
 
 FP = "7e2d411aedcf779dc4be7da47957f698696df954a7f557688d0052e9a18218fc"
@@ -32,6 +33,7 @@ def test_b7e0d401():
         "type": "started-compliant",
         "reported_at": 1783832698.6549723,
         "flow": "differ-ci",
+        "snapshot_index": 4988,
     }
 
 
@@ -88,3 +90,14 @@ def test_b7e0d405():
 def test_b7e0d406():
     """An empty array (no attestation present) yields an empty packages list."""
     assert sbom_packages_from_attestation([]) == []
+
+
+def test_b7e0d407():
+    """The attestation's html_url is extracted, unwrapping a single-element array."""
+    url = "https://app.kosli.com/cyber-dojo/flows/saver-ci/trails/abc?attestation_id=5062eb7c"
+    assert attestation_html_url([{"attestation_name": "sbom-facts", "html_url": url}]) == url
+
+
+def test_b7e0d408():
+    """A missing attestation (empty array) has no html_url."""
+    assert attestation_html_url([]) is None

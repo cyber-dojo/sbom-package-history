@@ -73,7 +73,7 @@ def main(argv=None):
     on_call = _dot_progress if args.progress else None
     reader = KosliReader(KosliCli(args.org, args.host, args.api_token, on_call=on_call))
     try:
-        report = build_report(reader, args.environment, from_ts, to_ts, args.package)
+        report = build_report(reader, args.environment, from_ts, to_ts, args.package, args.host, args.org)
     except KosliCliError as error:
         print(f"error: {error}", file=sys.stderr)
         return 1
